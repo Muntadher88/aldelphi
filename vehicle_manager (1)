@@ -1,0 +1,1658 @@
+"""
+╔══════════════════════════════════════════════════════════════════╗
+║         نظام إدارة الآليات والصيانة  v2.0                      ║
+║         Vehicle Fleet Management System                          ║
+║         Python / Tkinter  ·  بدون إنترنت  ·  حفظ محلي          ║
+╚══════════════════════════════════════════════════════════════════╝
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+import json, os, csv, shutil, calendar
+from datetime import date, datetime, timedelta
+import sys
+
+# ─────────────────────────────────────────────────────────────────
+#  PATHS
+# ─────────────────────────────────────────────────────────────────
+if getattr(sys, "frozen", False):
+    DATA_DIR = os.path.dirname(sys.executable)
+else:
+    DATA_DIR = os.path.dirname(os.path.abspath(__file__))
+
+VEHICLES_F  = os.path.join(DATA_DIR, "vehicles.json")
+USERS_F     = os.path.join(DATA_DIR, "users.json")
+BACKUP_DIR  = os.path.join(DATA_DIR, "backups")
+
+# ─────────────────────────────────────────────────────────────────
+#  CONSTANTS
+# ─────────────────────────────────────────────────────────────────
+VEHICLE_TYPES = ["", "شاحنة", "حفارة", "لودر", "كريين",
+                 "سيارة نقل", "جرافة", "مضخة", "مولد كهربائي", "أخرى"]
+OIL_GRADES    = ["", "5W-30", "5W-40", "10W-30", "10W-40",
+                 "15W-40", "20W-50", "SAE 40", "SAE 50", "HD 40", "HD 50"]
+OIL_INTERVALS = ["", "30 يوم", "60 يوم", "90 يوم", "180 يوم", "365 يوم"]
+
+# ─────────────────────────────────────────────────────────────────
+#  COLORS
+# ─────────────────────────────────────────────────────────────────
+BG      = "#0a0e1a"
+CARD    = "#111827"
+CARD2   = "#1a2235"
+BORDER  = "#1e3a5f"
+ACCENT  = "#f59e0b"
+ACCENT2 = "#3b82f6"
+ACCENT3 = "#10b981"
+DANGER  = "#ef4444"
+WARN    = "#f97316"
+TEXT    = "#f1f5f9"
+MUTED   = "#94a3b8"
+INP     = "#0d1520"
+HDR     = "#0d1b2e"
+ROW_A   = "#111827"
+ROW_B   = "#0f1724"
+
+# ─────────────────────────────────────────────────────────────────
+#  DATA HELPERS
+# ─────────────────────────────────────────────────────────────────
+def load_json(path, default):
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return default
+
+def save_json(path, data, backup=False):
+    if backup:
+        _make_backup(path)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def _make_backup(path):
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        fname = os.path.basename(path)
+        ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dst   = os.path.join(BACKUP_DIR, f"{fname}.{ts}.bak")
+        if os.path.exists(path):
+            shutil.copy2(path, dst)
+        # Keep only last 5 backups per file
+        backups = sorted(f for f in os.listdir(BACKUP_DIR) if f.startswith(fname))
+        for old in backups[:-5]:
+            os.remove(os.path.join(BACKUP_DIR, old))
+    except Exception:
+        pass
+
+def load_vehicles():  return load_json(VEHICLES_F, [])
+def save_vehicles(v): save_json(VEHICLES_F, v, backup=True)
+def load_users():
+    d = [{"username":"admin","password":"admin123","role":"admin","name":"المدير"}]
+    return load_json(USERS_F, d)
+def save_users(u): save_json(USERS_F, u)
+
+# ─────────────────────────────────────────────────────────────────
+#  DATE HELPERS
+# ─────────────────────────────────────────────────────────────────
+def days_until(date_str):
+    if not date_str or str(date_str).strip() == "":
+        return None
+    try:
+        d = datetime.strptime(str(date_str).strip(), "%Y-%m-%d").date()
+        return (d - date.today()).days
+    except Exception:
+        return None
+
+def is_valid_date(s):
+    try:
+        datetime.strptime(s.strip(), "%Y-%m-%d")
+        return True
+    except Exception:
+        return False
+
+def add_days_to_date(date_str, days):
+    try:
+        d = datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
+        return (d + timedelta(days=days)).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+def status_text(date_str):
+    d = days_until(date_str)
+    if d is None:   return "غير محدد", MUTED
+    if d < 0:       return f"متأخر {abs(d)} يوم", DANGER
+    if d == 0:      return "اليوم!", WARN
+    if d <= 7:      return f"بعد {d} أيام", ACCENT
+    return f"بعد {d} يوم", ACCENT3
+
+def status_tag(date_str):
+    d = days_until(date_str)
+    if d is None:        return "ok"
+    if d < 0:            return "danger"
+    if d <= 7:           return "warn"
+    return "ok"
+
+# ─────────────────────────────────────────────────────────────────
+#  STYLE
+# ─────────────────────────────────────────────────────────────────
+def apply_style(root):
+    s = ttk.Style(root)
+    s.theme_use("clam")
+    s.configure(".",
+        background=BG, foreground=TEXT,
+        font=("Segoe UI", 10), troughcolor=BG)
+    s.configure("TNotebook",   background=BG, borderwidth=0, tabmargins=0)
+    s.configure("TNotebook.Tab",
+        background=CARD2, foreground=MUTED,
+        padding=[18, 10], font=("Segoe UI", 10, "bold"),
+        borderwidth=0)
+    s.map("TNotebook.Tab",
+        background=[("selected", CARD)],
+        foreground=[("selected", ACCENT)])
+    s.configure("Treeview",
+        background=CARD, fieldbackground=CARD,
+        foreground=TEXT, rowheight=34,
+        font=("Segoe UI", 10), borderwidth=0)
+    s.configure("Treeview.Heading",
+        background=HDR, foreground=ACCENT,
+        font=("Segoe UI", 9, "bold"), relief="flat", borderwidth=0)
+    s.map("Treeview",
+        background=[("selected", BORDER)],
+        foreground=[("selected", TEXT)])
+    s.configure("TScrollbar",
+        background=CARD2, troughcolor=BG,
+        arrowcolor=MUTED, borderwidth=0)
+    s.configure("TCombobox",
+        fieldbackground=INP, background=INP,
+        foreground=TEXT, selectbackground=BORDER,
+        arrowcolor=MUTED)
+    s.map("TCombobox",
+        fieldbackground=[("readonly", INP)],
+        foreground=[("readonly", TEXT)])
+    s.configure("TSeparator", background=BORDER)
+
+# ─────────────────────────────────────────────────────────────────
+#  WIDGET HELPERS
+# ─────────────────────────────────────────────────────────────────
+def make_entry(parent, var=None, width=24, show="", readonly=False):
+    state = "readonly" if readonly else "normal"
+    e = tk.Entry(parent, textvariable=var, width=width,
+                 bg=INP, fg=TEXT, insertbackground=ACCENT,
+                 relief="flat", bd=0,
+                 highlightthickness=1,
+                 highlightbackground=BORDER,
+                 highlightcolor=ACCENT,
+                 disabledbackground=CARD2,
+                 disabledforeground=MUTED,
+                 font=("Segoe UI", 10),
+                 show=show)
+    if readonly:
+        e.config(state="readonly")
+    return e
+
+def make_combo(parent, values, var, width=22):
+    c = ttk.Combobox(parent, values=values, textvariable=var,
+                     width=width, state="readonly",
+                     font=("Segoe UI", 10))
+    c.option_add("*TCombobox*Listbox.background", CARD)
+    c.option_add("*TCombobox*Listbox.foreground", TEXT)
+    c.option_add("*TCombobox*Listbox.selectBackground", BORDER)
+    c.option_add("*TCombobox*Listbox.font", ("Segoe UI", 10))
+    return c
+
+def make_btn(parent, text, cmd, color=ACCENT, fg=BG, width=None, size=10):
+    kw = {}
+    if width: kw["width"] = width
+    b = tk.Button(parent, text=text, command=cmd,
+                  bg=color, fg=fg,
+                  activebackground=color, activeforeground=fg,
+                  relief="flat", cursor="hand2",
+                  font=("Segoe UI", size, "bold"),
+                  padx=12, pady=7, **kw)
+    # Hover effect
+    b.bind("<Enter>", lambda e: b.config(bg=_lighten(color)))
+    b.bind("<Leave>", lambda e: b.config(bg=color))
+    return b
+
+def _lighten(hex_color):
+    """Return a slightly lighter version of hex color."""
+    try:
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        r = min(255, r + 25)
+        g = min(255, g + 25)
+        b = min(255, b + 25)
+        return f"#{r:02x}{g:02x}{b:02x}"
+    except Exception:
+        return hex_color
+
+def card_frame(parent, bg=CARD, **kw):
+    return tk.Frame(parent, bg=bg, relief="flat",
+                    highlightthickness=1,
+                    highlightbackground=BORDER, **kw)
+
+def bind_mousewheel(widget, canvas):
+    """Bind mousewheel to scroll a canvas — cross-platform."""
+    def _scroll(event):
+        if event.num == 4 or event.delta > 0:
+            canvas.yview_scroll(-1, "units")
+        elif event.num == 5 or event.delta < 0:
+            canvas.yview_scroll(1, "units")
+    widget.bind("<MouseWheel>", _scroll)     # Windows / Mac
+    widget.bind("<Button-4>",   _scroll)     # Linux scroll up
+    widget.bind("<Button-5>",   _scroll)     # Linux scroll down
+
+def scrollable_frame(parent):
+    """Return (outer_frame, inner_frame, canvas) — ready for content."""
+    outer  = tk.Frame(parent, bg=BG)
+    canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
+    vsb    = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=vsb.set)
+    vsb.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+    inner  = tk.Frame(canvas, bg=BG)
+    win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+    def _on_inner(e):
+        canvas.configure(scrollregion=canvas.bbox("all"))
+    def _on_canvas(e):
+        canvas.itemconfig(win_id, width=e.width)
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    inner.bind("<Configure>", _on_inner)
+    canvas.bind("<Configure>", _on_canvas)
+    bind_mousewheel(canvas, canvas)
+    bind_mousewheel(inner,  canvas)
+    return outer, inner, canvas
+
+# ─────────────────────────────────────────────────────────────────
+#  CALENDAR POPUP
+# ─────────────────────────────────────────────────────────────────
+class DatePicker(tk.Toplevel):
+    """Simple clickable calendar popup that sets a StringVar."""
+    def __init__(self, parent, var):
+        super().__init__(parent)
+        self.var = var
+        self.configure(bg=CARD)
+        self.overrideredirect(True)
+        self.resizable(False, False)
+        try:
+            d = datetime.strptime(var.get().strip(), "%Y-%m-%d").date()
+            self._year, self._month = d.year, d.month
+        except Exception:
+            today = date.today()
+            self._year, self._month = today.year, today.month
+        self._build()
+        self._position(parent)
+        self.grab_set()
+        self.focus_force()
+        self.bind("<Escape>", lambda e: self.destroy())
+
+    def _position(self, parent):
+        self.update_idletasks()
+        x = parent.winfo_rootx()
+        y = parent.winfo_rooty() + parent.winfo_height() + 4
+        self.geometry(f"+{x}+{y}")
+
+    def _build(self):
+        for w in self.winfo_children():
+            w.destroy()
+
+        # Header
+        hdr = tk.Frame(self, bg=HDR)
+        hdr.pack(fill="x")
+        make_btn(hdr, "◀", self._prev_month,
+                 color=HDR, fg=ACCENT, width=3, size=11).pack(side="left", padx=4, pady=6)
+        tk.Label(hdr,
+                 text=f"{calendar.month_name[self._month]} {self._year}",
+                 bg=HDR, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold")).pack(side="left", expand=True)
+        make_btn(hdr, "▶", self._next_month,
+                 color=HDR, fg=ACCENT, width=3, size=11).pack(side="right", padx=4, pady=6)
+
+        # Day names
+        days_row = tk.Frame(self, bg=CARD)
+        days_row.pack(fill="x", padx=4)
+        for d in ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"]:
+            tk.Label(days_row, text=d, bg=CARD, fg=MUTED,
+                     font=("Segoe UI", 8, "bold"), width=4).pack(side="left")
+
+        # Separator
+        ttk.Separator(self, orient="horizontal").pack(fill="x")
+
+        # Calendar grid
+        grid = tk.Frame(self, bg=CARD)
+        grid.pack(padx=4, pady=4)
+
+        cal  = calendar.monthcalendar(self._year, self._month)
+        today = date.today()
+        try:
+            sel  = datetime.strptime(self.var.get().strip(), "%Y-%m-%d").date()
+        except Exception:
+            sel  = None
+
+        for week in cal:
+            row_f = tk.Frame(grid, bg=CARD)
+            row_f.pack()
+            for day in week:
+                if day == 0:
+                    tk.Label(row_f, text="", bg=CARD, width=4, height=2).pack(side="left")
+                else:
+                    d_date = date(self._year, self._month, day)
+                    is_today = d_date == today
+                    is_sel   = d_date == sel
+                    bg   = ACCENT  if is_sel   else (ACCENT2 if is_today else CARD2)
+                    fg   = BG      if is_sel   else (TEXT    if is_today else TEXT)
+                    cell = tk.Button(row_f, text=str(day),
+                                     bg=bg, fg=fg,
+                                     activebackground=ACCENT, activeforeground=BG,
+                                     relief="flat", cursor="hand2", width=4, height=2,
+                                     font=("Segoe UI", 9),
+                                     command=lambda d=d_date: self._pick(d))
+                    cell.pack(side="left", padx=1, pady=1)
+
+        # Today button
+        make_btn(self, "📅 اليوم", lambda: self._pick(date.today()),
+                 color=BORDER, fg=TEXT, size=9).pack(fill="x", padx=4, pady=(2, 4))
+
+    def _prev_month(self):
+        if self._month == 1:  self._month, self._year = 12, self._year - 1
+        else:                 self._month -= 1
+        self._build()
+
+    def _next_month(self):
+        if self._month == 12: self._month, self._year = 1, self._year + 1
+        else:                 self._month += 1
+        self._build()
+
+    def _pick(self, d):
+        self.var.set(d.strftime("%Y-%m-%d"))
+        self.destroy()
+
+# ─────────────────────────────────────────────────────────────────
+#  DATE FIELD WIDGET  (entry + calendar button)
+# ─────────────────────────────────────────────────────────────────
+class DateField(tk.Frame):
+    def __init__(self, parent, var, **kw):
+        super().__init__(parent, bg=parent["bg"], **kw)
+        self.var = var
+        self.entry = make_entry(self, var, width=16)
+        self.entry.pack(side="left", fill="x", expand=True)
+        cal_btn = tk.Button(self, text="📅",
+                            bg=BORDER, fg=ACCENT,
+                            activebackground=ACCENT, activeforeground=BG,
+                            relief="flat", cursor="hand2",
+                            font=("Segoe UI", 10), padx=4,
+                            command=self._open_cal)
+        cal_btn.pack(side="left", padx=(2, 0))
+        # Highlight entry on bad date
+        self.entry.bind("<FocusOut>", self._validate)
+
+    def _open_cal(self):
+        DatePicker(self.entry, self.var)
+
+    def _validate(self, event=None):
+        val = self.var.get().strip()
+        if val == "":
+            self.entry.config(highlightbackground=BORDER)
+        elif is_valid_date(val):
+            self.entry.config(highlightbackground=ACCENT3)
+        else:
+            self.entry.config(highlightbackground=DANGER)
+
+# ─────────────────────────────────────────────────────────────────
+#  LOGIN WINDOW
+# ─────────────────────────────────────────────────────────────────
+class LoginWindow:
+    def __init__(self, on_success):
+        self.on_success = on_success
+        self.win = tk.Tk()
+        self.win.title("نظام إدارة الآليات — تسجيل الدخول")
+        self.win.configure(bg=BG)
+        self.win.resizable(False, False)
+        apply_style(self.win)
+        self._build()
+        w, h = 440, 500
+        sw = self.win.winfo_screenwidth()
+        sh = self.win.winfo_screenheight()
+        self.win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        self.win.mainloop()
+
+    def _build(self):
+        outer = tk.Frame(self.win, bg=BG)
+        outer.pack(expand=True, fill="both", padx=44, pady=28)
+
+        # Logo area
+        logo_f = tk.Frame(outer, bg=BG)
+        logo_f.pack(pady=(0, 18))
+        tk.Label(logo_f, text="🚛", bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 52)).pack()
+        tk.Label(logo_f, text="نظام إدارة الآليات",
+                 bg=BG, fg=ACCENT, font=("Segoe UI", 17, "bold")).pack()
+        tk.Label(logo_f, text="Fleet Management System",
+                 bg=BG, fg=MUTED, font=("Segoe UI", 9)).pack()
+
+        box = card_frame(outer)
+        box.pack(fill="x")
+        inner = tk.Frame(box, bg=CARD)
+        inner.pack(padx=26, pady=26, fill="x")
+
+        def field(label, var, show=""):
+            tk.Label(inner, text=label, bg=CARD, fg=MUTED,
+                     font=("Segoe UI", 8, "bold"),
+                     anchor="w").pack(fill="x")
+            e = make_entry(inner, var, width=32, show=show)
+            e.pack(fill="x", pady=(3, 12))
+            return e
+
+        self.u_var = tk.StringVar()
+        self.p_var = tk.StringVar()
+        ue = field("👤  اسم المستخدم", self.u_var)
+        pe = field("🔒  كلمة المرور",  self.p_var, show="●")
+
+        ue.bind("<Return>", lambda e: pe.focus())
+        pe.bind("<Return>", lambda e: self._do_login())
+
+        make_btn(inner, "🔐  تسجيل الدخول", self._do_login,
+                 width=32, size=11).pack(fill="x", pady=4)
+
+        self.err = tk.Label(inner, text="", bg=CARD, fg=DANGER,
+                            font=("Segoe UI", 9), wraplength=320)
+        self.err.pack(pady=(4, 0))
+
+        tk.Label(outer,
+                 text="نظام إدارة الآليات والصيانة  ·  الإصدار 2.0",
+                 bg=BG, fg="#2d3748",
+                 font=("Segoe UI", 8)).pack(pady=10)
+        ue.focus()
+
+    def _do_login(self):
+        u = self.u_var.get().strip()
+        p = self.p_var.get()
+        if not u or not p:
+            self.err.config(text="⚠️ يرجى إدخال اسم المستخدم وكلمة المرور")
+            return
+        found = next((x for x in load_users()
+                      if x["username"] == u and x["password"] == p), None)
+        if not found:
+            self.err.config(text="❌ اسم المستخدم أو كلمة المرور غير صحيحة")
+            self.p_var.set("")
+            return
+        self.win.destroy()
+        self.on_success(found)
+
+# ─────────────────────────────────────────────────────────────────
+#  MAIN APPLICATION
+# ─────────────────────────────────────────────────────────────────
+class VehicleApp:
+    def __init__(self, user):
+        self.current_user = user
+        self.vehicles     = load_vehicles()
+        self._sort_col    = None
+        self._sort_rev    = False
+
+        self.root = tk.Tk()
+        self.root.title("🚛  نظام إدارة الآليات والصيانة  v2.0")
+        self.root.configure(bg=BG)
+        apply_style(self.root)
+        self._maximize()
+
+        self._build_header()
+        self._build_notebook()
+        self._build_statusbar()
+        self._refresh_all()
+        self._check_startup_alerts()
+
+        # Keyboard shortcuts
+        self.root.bind("<F5>",         lambda e: self._refresh_all())
+        self.root.bind("<Control-e>",  lambda e: self._export_csv())
+        self.root.bind("<Control-n>",  lambda e: self.nb.select(0))
+
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.mainloop()
+
+    def _maximize(self):
+        try:
+            self.root.state("zoomed")
+        except Exception:
+            try:
+                self.root.attributes("-zoomed", True)
+            except Exception:
+                sw = self.root.winfo_screenwidth()
+                sh = self.root.winfo_screenheight()
+                self.root.geometry(f"{sw}x{sh}+0+0")
+
+    # ══════════════════════════════════════════════
+    #  HEADER
+    # ══════════════════════════════════════════════
+    def _build_header(self):
+        hdr = tk.Frame(self.root, bg=HDR,
+                       highlightthickness=2, highlightbackground=ACCENT)
+        hdr.pack(fill="x")
+        inner = tk.Frame(hdr, bg=HDR)
+        inner.pack(fill="x", padx=20, pady=10)
+
+        # Left: logo + title
+        left = tk.Frame(inner, bg=HDR)
+        left.pack(side="left")
+        tk.Label(left, text="🚛", bg=HDR, fg=ACCENT,
+                 font=("Segoe UI", 22)).pack(side="left", padx=(0, 8))
+        tk.Label(left, text="نظام إدارة الآليات والصيانة",
+                 bg=HDR, fg=ACCENT,
+                 font=("Segoe UI", 14, "bold")).pack(side="left")
+        tk.Label(left, text=" v2.0",
+                 bg=HDR, fg=MUTED,
+                 font=("Segoe UI", 9)).pack(side="left", pady=4)
+
+        # Right: user + buttons
+        right = tk.Frame(inner, bg=HDR)
+        right.pack(side="right")
+
+        name     = self.current_user.get("name", self.current_user["username"])
+        role_txt = "مدير النظام" if self.current_user["role"] == "admin" else "مستخدم"
+
+        user_badge = tk.Frame(right, bg=HDR,
+                              highlightthickness=1,
+                              highlightbackground=BORDER)
+        user_badge.pack(side="left", padx=8)
+        tk.Label(user_badge,
+                 text=f"👤  {name}",
+                 bg=HDR, fg=ACCENT,
+                 font=("Segoe UI", 9, "bold")).pack(
+                     side="left", padx=10, pady=6)
+        tk.Label(user_badge,
+                 text=f"({role_txt})",
+                 bg=HDR, fg=MUTED,
+                 font=("Segoe UI", 8)).pack(side="left", padx=(0, 10))
+
+        if self.current_user["role"] == "admin":
+            make_btn(right, "👥 المستخدمين", self._open_user_mgmt,
+                     color=CARD2, fg=TEXT, size=9).pack(side="left", padx=4)
+            make_btn(right, "🔑 تغيير كلمة المرور",
+                     self._change_password,
+                     color=CARD2, fg=TEXT, size=9).pack(side="left", padx=4)
+
+        make_btn(right, "📤 تصدير CSV", self._export_csv,
+                 color=ACCENT2, fg="#fff", size=9).pack(side="left", padx=4)
+        make_btn(right, "🚪 خروج", self._logout,
+                 color=DANGER, fg="#fff", size=9).pack(side="left", padx=4)
+
+    # ══════════════════════════════════════════════
+    #  NOTEBOOK
+    # ══════════════════════════════════════════════
+    def _build_notebook(self):
+        self.nb = ttk.Notebook(self.root)
+        self.nb.pack(fill="both", expand=True)
+
+        self.tab_add   = tk.Frame(self.nb, bg=BG)
+        self.tab_list  = tk.Frame(self.nb, bg=BG)
+        self.tab_stats = tk.Frame(self.nb, bg=BG)
+        self.tab_notif = tk.Frame(self.nb, bg=BG)
+
+        self.nb.add(self.tab_add,   text="  ➕ إضافة آلية  ")
+        self.nb.add(self.tab_list,  text="  📋 قائمة الآليات  ")
+        self.nb.add(self.tab_stats, text="  📊 الإحصائيات  ")
+        self.nb.add(self.tab_notif, text="  🔔 التنبيهات  ")
+
+        self.nb.bind("<<NotebookTabChanged>>", self._on_tab_change)
+
+        self._build_add_tab()
+        self._build_list_tab()
+        self._build_stats_tab()
+        self._build_notif_tab()
+
+    def _on_tab_change(self, _=None):
+        idx = self.nb.index(self.nb.select())
+        if idx == 1: self._refresh_table()
+        if idx == 2: self._refresh_stats()
+        if idx == 3: self._refresh_notif()
+
+    # ══════════════════════════════════════════════
+    #  STATUS BAR
+    # ══════════════════════════════════════════════
+    def _build_statusbar(self):
+        sb = tk.Frame(self.root, bg=HDR,
+                      highlightthickness=1, highlightbackground=BORDER)
+        sb.pack(fill="x", side="bottom")
+        self._status_left  = tk.Label(sb, text="", bg=HDR, fg=MUTED,
+                                       font=("Segoe UI", 8), anchor="w")
+        self._status_right = tk.Label(sb, text="", bg=HDR, fg=MUTED,
+                                       font=("Segoe UI", 8), anchor="e")
+        self._status_left.pack(side="left",  padx=12, pady=4)
+        self._status_right.pack(side="right", padx=12, pady=4)
+        self._update_status()
+
+    def _update_status(self):
+        n       = len(self.vehicles)
+        now     = datetime.now().strftime("%Y-%m-%d  %H:%M")
+        overdue = sum(1 for v in self.vehicles
+                      if status_tag(v.get("oilNextDate"))    == "danger"
+                      or status_tag(v.get("filterNextDate")) == "danger")
+        self._status_left.config(
+            text=f"إجمالي الآليات: {n}   |   متأخرة الصيانة: {overdue}")
+        self._status_right.config(
+            text=f"آخر تحديث: {now}   |   F5 تحديث  |  Ctrl+E تصدير  |  Ctrl+N إضافة")
+
+    # ══════════════════════════════════════════════
+    #  ADD TAB
+    # ══════════════════════════════════════════════
+    def _build_add_tab(self):
+        outer, inner, canvas = scrollable_frame(self.tab_add)
+        outer.pack(fill="both", expand=True)
+        bind_mousewheel(self.tab_add, canvas)
+
+        wrap = tk.Frame(inner, bg=BG)
+        wrap.pack(fill="x", padx=36, pady=20)
+
+        self.add_vars = {}
+
+        # ── Card 1: Vehicle Info ──
+        self._section_label(wrap, "🚗  بيانات الآلية")
+        c1 = card_frame(wrap)
+        c1.pack(fill="x", pady=(0, 14))
+        g1 = tk.Frame(c1, bg=CARD)
+        g1.pack(padx=20, pady=16, fill="x")
+
+        fields_v = [
+            ("اسم السائق *",          "driverName",  "entry"),
+            ("نوع الآلية",            "vehicleType", "combo", VEHICLE_TYPES),
+            ("اسم الآلية *",          "vehicleName", "entry"),
+            ("رقم الآلية / اللوحة *", "vehicleNum",  "entry"),
+        ]
+        self._build_grid(g1, fields_v, self.add_vars, cols=2)
+
+        # ── Card 2: Oil & Fuel ──
+        self._section_label(wrap, "🛢️  بيانات الزيت والوقود")
+        c2 = card_frame(wrap)
+        c2.pack(fill="x", pady=(0, 14))
+        g2 = tk.Frame(c2, bg=CARD)
+        g2.pack(padx=20, pady=16, fill="x")
+
+        fields_o = [
+            ("كمية الزيت مع الفلتر (لتر)",    "oilWithFilter",    "entry"),
+            ("كمية الزيت بدون الفلتر (لتر)",  "oilWithoutFilter", "entry"),
+            ("درجة / مواصفة الزيت",           "oilGrade",         "combo", OIL_GRADES),
+            ("كمية الوقود (لتر/يوم)",          "fuelQty",          "entry"),
+        ]
+        self._build_grid(g2, fields_o, self.add_vars, cols=2)
+
+        # ── Card 3: Maintenance Dates ──
+        self._section_label(wrap, "📅  تواريخ الصيانة")
+        c3 = card_frame(wrap)
+        c3.pack(fill="x", pady=(0, 14))
+        g3 = tk.Frame(c3, bg=CARD)
+        g3.pack(padx=20, pady=16, fill="x")
+
+        date_fields = [
+            ("تاريخ تغيير الزيت",               "oilChangeDate",    "date"),
+            ("تاريخ استحقاق تغيير الزيت",       "oilNextDate",      "date"),
+            ("تاريخ تغيير فلتر الزيت",           "filterChangeDate", "date"),
+            ("تاريخ استحقاق تغيير الفلتر",       "filterNextDate",   "date"),
+        ]
+        self._build_grid(g3, date_fields, self.add_vars, cols=2)
+
+        # Auto-calc helper row
+        helper = tk.Frame(c3, bg=CARD)
+        helper.pack(fill="x", padx=20, pady=(0, 12))
+        tk.Label(helper, text="⚡ حساب تلقائي للاستحقاق من تاريخ التغيير:",
+                 bg=CARD, fg=MUTED, font=("Segoe UI", 8, "bold")).pack(side="left")
+        self._auto_interval_var = tk.StringVar()
+        cb = make_combo(helper, OIL_INTERVALS, self._auto_interval_var, width=12)
+        cb.pack(side="left", padx=8)
+        make_btn(helper, "⚙️ تطبيق", self._auto_calc_dates,
+                 color=ACCENT2, fg="#fff", size=8).pack(side="left")
+
+        # ── Card 4: Notes ──
+        self._section_label(wrap, "📝  ملاحظات")
+        c4 = card_frame(wrap)
+        c4.pack(fill="x", pady=(0, 14))
+        g4 = tk.Frame(c4, bg=CARD)
+        g4.pack(padx=20, pady=12, fill="x")
+        self.add_vars["notes"] = tk.StringVar()
+        notes_e = make_entry(g4, self.add_vars["notes"], width=60)
+        notes_e.pack(fill="x")
+
+        # ── Action Buttons ──
+        btn_row = tk.Frame(wrap, bg=BG)
+        btn_row.pack(fill="x", pady=10)
+        make_btn(btn_row, "✅  حفظ البيانات", self._add_vehicle,
+                 color=ACCENT, fg=BG).pack(side="left", padx=4)
+        make_btn(btn_row, "📋  نسخ من آخر آلية", self._copy_last,
+                 color=CARD2, fg=TEXT).pack(side="left", padx=4)
+        make_btn(btn_row, "🗑️  مسح الحقول", self._clear_add_form,
+                 color=CARD2, fg=TEXT).pack(side="left", padx=4)
+
+    def _section_label(self, parent, text):
+        tk.Label(parent, text=text, bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(10, 4))
+
+    def _build_grid(self, parent, fields, var_dict, cols=2):
+        # BUG FIX: loop instead of passing list to columnconfigure
+        for c in range(cols):
+            parent.columnconfigure(c, weight=1)
+
+        for i, f in enumerate(fields):
+            r, c = divmod(i, cols)
+            cell = tk.Frame(parent, bg=CARD)
+            cell.grid(row=r, column=c, padx=8, pady=6, sticky="nsew")
+
+            label, key, kind = f[0], f[1], f[2]
+            tk.Label(cell, text=label, bg=CARD, fg=MUTED,
+                     font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 3))
+
+            var = tk.StringVar()
+            var_dict[key] = var
+
+            if kind == "entry":
+                make_entry(cell, var, width=26).pack(fill="x")
+            elif kind == "combo":
+                make_combo(cell, f[3], var, width=24).pack(fill="x")
+            elif kind == "date":
+                DateField(cell, var).pack(fill="x")
+
+    def _auto_calc_dates(self):
+        iv = self._auto_interval_var.get()
+        if not iv:
+            return
+        days_map = {"30 يوم": 30, "60 يوم": 60, "90 يوم": 90,
+                    "180 يوم": 180, "365 يوم": 365}
+        days = days_map.get(iv, 0)
+        if not days:
+            return
+        ocd = self.add_vars["oilChangeDate"].get().strip()
+        fcd = self.add_vars["filterChangeDate"].get().strip()
+        if ocd and is_valid_date(ocd):
+            self.add_vars["oilNextDate"].set(add_days_to_date(ocd, days))
+        if fcd and is_valid_date(fcd):
+            self.add_vars["filterNextDate"].set(add_days_to_date(fcd, days))
+
+    def _add_vehicle(self):
+        av = self.add_vars
+        driver = av["driverName"].get().strip()
+        name   = av["vehicleName"].get().strip()
+        num    = av["vehicleNum"].get().strip()
+
+        if not driver or not name or not num:
+            messagebox.showwarning("حقول مطلوبة",
+                "⚠️ يرجى إدخال:\n• اسم السائق\n• اسم الآلية\n• رقم الآلية")
+            return
+
+        # Validate dates
+        for dk in ("oilChangeDate", "oilNextDate", "filterChangeDate", "filterNextDate"):
+            val = av[dk].get().strip()
+            if val and not is_valid_date(val):
+                messagebox.showwarning("تاريخ غير صحيح",
+                    f"⚠️ التاريخ في حقل '{dk}' غير صحيح.\nاستخدم الصيغة: YYYY-MM-DD")
+                return
+
+        # Check duplicate
+        if any(v["vehicleNum"] == num for v in self.vehicles):
+            if not messagebox.askyesno("تكرار",
+                f"⚠️ يوجد آلية برقم '{num}' مسبقاً.\nهل تريد الإضافة على أي حال؟"):
+                return
+
+        v = {k: vr.get().strip() for k, vr in av.items()}
+        v["addedAt"] = datetime.now().isoformat()
+        self.vehicles.append(v)
+        save_vehicles(self.vehicles)
+        self._clear_add_form()
+        self._refresh_all()
+        messagebox.showinfo("تم الحفظ", "✅ تم حفظ بيانات الآلية بنجاح!")
+        self.nb.select(1)
+
+    def _clear_add_form(self):
+        for v in self.add_vars.values():
+            v.set("")
+
+    def _copy_last(self):
+        if not self.vehicles:
+            messagebox.showinfo("تنبيه", "لا توجد آليات مسجلة بعد.")
+            return
+        last = self.vehicles[-1]
+        for k, v in self.add_vars.items():
+            if k not in ("vehicleNum", "driverName", "addedAt"):
+                v.set(last.get(k, "") or "")
+        messagebox.showinfo("تم", "تم نسخ بيانات الآلية الأخيرة (ما عدا الاسم والرقم)")
+
+    # ══════════════════════════════════════════════
+    #  LIST TAB
+    # ══════════════════════════════════════════════
+    def _build_list_tab(self):
+        # ── Toolbar ──
+        tb = tk.Frame(self.tab_list, bg=BG)
+        tb.pack(fill="x", padx=16, pady=10)
+
+        tk.Label(tb, text="🔍", bg=BG, fg=MUTED,
+                 font=("Segoe UI", 12)).pack(side="left")
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *_: self._refresh_table())
+        se = make_entry(tb, self.search_var, width=28)
+        se.pack(side="left", padx=(6, 16))
+
+        tk.Label(tb, text="نوع الآلية:", bg=BG, fg=MUTED,
+                 font=("Segoe UI", 9)).pack(side="left")
+        self.filter_type_var = tk.StringVar()
+        self.filter_type_var.trace_add("write", lambda *_: self._refresh_table())
+        ft = make_combo(tb, ["الكل"] + VEHICLE_TYPES[1:],
+                        self.filter_type_var, width=14)
+        ft.pack(side="left", padx=6)
+        self.filter_type_var.set("الكل")
+
+        tk.Label(tb, text="الحالة:", bg=BG, fg=MUTED,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(12, 0))
+        self.filter_status_var = tk.StringVar(value="الكل")
+        self.filter_status_var.trace_add("write", lambda *_: self._refresh_table())
+        fs = make_combo(tb, ["الكل", "متأخر", "يستحق قريباً", "جيد"],
+                        self.filter_status_var, width=14)
+        fs.pack(side="left", padx=6)
+
+        make_btn(tb, "🔄", self._refresh_table,
+                 color=CARD2, fg=TEXT, size=9).pack(side="left", padx=4)
+
+        self._count_lbl = tk.Label(tb, text="", bg=BG, fg=MUTED,
+                                    font=("Segoe UI", 9))
+        self._count_lbl.pack(side="left", padx=10)
+
+        # ── Treeview ──
+        cols = ("#", "السائق", "النوع", "الآلية", "الرقم",
+                "زيت+فلتر(ل)", "زيت(ل)", "درجة الزيت", "وقود(ل/يوم)",
+                "تغيير الزيت", "استحقاق الزيت", "حالة الزيت",
+                "تغيير الفلتر", "استحقاق الفلتر", "حالة الفلتر", "ملاحظات")
+
+        tree_f = tk.Frame(self.tab_list, bg=BG)
+        tree_f.pack(fill="both", expand=True, padx=16, pady=(0, 4))
+
+        xsb = ttk.Scrollbar(tree_f, orient="horizontal")
+        ysb = ttk.Scrollbar(tree_f, orient="vertical")
+        self.tree = ttk.Treeview(
+            tree_f, columns=cols, show="headings",
+            xscrollcommand=xsb.set, yscrollcommand=ysb.set,
+            selectmode="browse")
+        xsb.config(command=self.tree.xview)
+        ysb.config(command=self.tree.yview)
+        xsb.pack(side="bottom", fill="x")
+        ysb.pack(side="right",  fill="y")
+        self.tree.pack(fill="both", expand=True)
+
+        widths = [32, 110, 90, 120, 100, 90, 75, 85, 90,
+                  105, 110, 105, 105, 110, 105, 140]
+        for col, w in zip(cols, widths):
+            # Sortable headers
+            self.tree.heading(col, text=col,
+                command=lambda c=col: self._sort_by(c))
+            self.tree.column(col, width=w, anchor="center", minwidth=40)
+
+        # Row tags
+        self.tree.tag_configure("danger", foreground=DANGER,   background=ROW_A)
+        self.tree.tag_configure("warn",   foreground=ACCENT,   background=ROW_A)
+        self.tree.tag_configure("ok",     foreground=ACCENT3,  background=ROW_A)
+        self.tree.tag_configure("danger_b", foreground=DANGER, background=ROW_B)
+        self.tree.tag_configure("warn_b",   foreground=ACCENT, background=ROW_B)
+        self.tree.tag_configure("ok_b",     foreground=ACCENT3,background=ROW_B)
+
+        # Double-click to edit
+        self.tree.bind("<Double-1>", lambda e: self._open_edit())
+        self.tree.bind("<Delete>",   lambda e: self._delete_vehicle())
+
+        # ── Action Buttons ──
+        act = tk.Frame(self.tab_list, bg=BG)
+        act.pack(pady=6)
+        make_btn(act, "✏️  تعديل  (دبل كليك)", self._open_edit,
+                 color=ACCENT2, fg="#fff").pack(side="left", padx=6)
+        make_btn(act, "🗑️  حذف  (Del)", self._delete_vehicle,
+                 color=DANGER, fg="#fff").pack(side="left", padx=6)
+        make_btn(act, "📋  نسخ بيانات للإضافة", self._copy_selected_to_add,
+                 color=CARD2, fg=TEXT).pack(side="left", padx=6)
+
+    def _sort_by(self, col):
+        """Sort treeview by column header click."""
+        if self._sort_col == col:
+            self._sort_rev = not self._sort_rev
+        else:
+            self._sort_col = col
+            self._sort_rev = False
+        self._refresh_table()
+
+    def _refresh_table(self):
+        self.tree.delete(*self.tree.get_children())
+
+        q      = self.search_var.get().lower().strip()
+        ftype  = self.filter_type_var.get() if hasattr(self, "filter_type_var") else "الكل"
+        fstatus = self.filter_status_var.get() if hasattr(self, "filter_status_var") else "الكل"
+
+        filtered_idx = []
+        for i, v in enumerate(self.vehicles):
+            # Text search
+            if q and not any(q in (v.get(k) or "").lower()
+                             for k in ("driverName","vehicleNum","vehicleName","notes")):
+                continue
+            # Type filter
+            if ftype and ftype != "الكل" and v.get("vehicleType") != ftype:
+                continue
+            # Status filter
+            if fstatus != "الكل":
+                ot = status_tag(v.get("oilNextDate"))
+                ft = status_tag(v.get("filterNextDate"))
+                worst = "danger" if "danger" in (ot, ft) else \
+                        "warn"   if "warn"   in (ot, ft) else "ok"
+                if fstatus == "متأخر"        and worst != "danger": continue
+                if fstatus == "يستحق قريباً" and worst != "warn":   continue
+                if fstatus == "جيد"          and worst != "ok":      continue
+            filtered_idx.append(i)
+
+        # Sort
+        if self._sort_col:
+            col_map = {
+                "#": None, "السائق": "driverName", "النوع": "vehicleType",
+                "الآلية": "vehicleName", "الرقم": "vehicleNum",
+            }
+            key = col_map.get(self._sort_col)
+            if key:
+                filtered_idx.sort(
+                    key=lambda i: (self.vehicles[i].get(key) or "").lower(),
+                    reverse=self._sort_rev)
+
+        for row_num, real_i in enumerate(filtered_idx):
+            v       = self.vehicles[real_i]
+            oil_t, oil_c = status_text(v.get("oilNextDate", ""))
+            flt_t, flt_c = status_text(v.get("filterNextDate", ""))
+
+            base_tag = "danger" if oil_c == DANGER or flt_c == DANGER else \
+                       "warn"   if oil_c == ACCENT  or flt_c == ACCENT  else "ok"
+            tag = base_tag + ("_b" if row_num % 2 else "")
+
+            def fmt_l(val, unit):
+                return f"{val} {unit}" if val else "-"
+
+            row_data = (
+                row_num + 1,
+                v.get("driverName", "-")  or "-",
+                v.get("vehicleType", "-") or "-",
+                v.get("vehicleName", "-") or "-",
+                v.get("vehicleNum",  "-") or "-",
+                fmt_l(v.get("oilWithFilter"),    "ل"),
+                fmt_l(v.get("oilWithoutFilter"), "ل"),
+                v.get("oilGrade",       "-") or "-",
+                fmt_l(v.get("fuelQty"), "ل/يوم"),
+                v.get("oilChangeDate",    "-") or "-",
+                v.get("oilNextDate",      "-") or "-",
+                oil_t,
+                v.get("filterChangeDate", "-") or "-",
+                v.get("filterNextDate",   "-") or "-",
+                flt_t,
+                v.get("notes", "-") or "-",
+            )
+            # BUG FIX: store real index in iid
+            self.tree.insert("", "end",
+                             iid=str(real_i),
+                             values=row_data,
+                             tags=(tag,))
+
+        count = len(filtered_idx)
+        total = len(self.vehicles)
+        self._count_lbl.config(
+            text=f"عرض {count} من {total} آلية"
+            + ("  ← انقر على العنوان للترتيب" if total else ""))
+        self._update_status()
+
+    def _delete_vehicle(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("تنبيه", "يرجى تحديد آلية أولاً")
+            return
+        real_i = int(sel[0])
+        v      = self.vehicles[real_i]
+        if messagebox.askyesno("تأكيد الحذف",
+                f"هل تريد حذف الآلية:\n\n"
+                f"  {v.get('vehicleName','-')}  ({v.get('vehicleNum','-')})\n"
+                f"  السائق: {v.get('driverName','-')}\n\n"
+                "لا يمكن التراجع عن هذا الإجراء."):
+            self.vehicles.pop(real_i)
+            save_vehicles(self.vehicles)
+            self._refresh_all()
+
+    def _copy_selected_to_add(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("تنبيه", "يرجى تحديد آلية أولاً")
+            return
+        real_i = int(sel[0])
+        v = self.vehicles[real_i]
+        for k, var in self.add_vars.items():
+            if k not in ("vehicleNum", "driverName"):
+                var.set(v.get(k, "") or "")
+        self.nb.select(0)
+        messagebox.showinfo("تم", "تم نسخ البيانات. يمكنك الآن تعديل الاسم والرقم.")
+
+    # ══════════════════════════════════════════════
+    #  EDIT DIALOG
+    # ══════════════════════════════════════════════
+    def _open_edit(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("تنبيه", "يرجى تحديد آلية أولاً")
+            return
+        real_i = int(sel[0])
+        v      = self.vehicles[real_i]
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title(f"✏️  تعديل:  {v.get('vehicleName','')}  ({v.get('vehicleNum','')})")
+        dlg.configure(bg=BG)
+        dlg.grab_set()
+        w_, h_ = 720, 600
+        sw     = dlg.winfo_screenwidth()
+        sh     = dlg.winfo_screenheight()
+        dlg.geometry(f"{w_}x{h_}+{(sw-w_)//2}+{(sh-h_)//2}")
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+
+        outer, inner, canvas = scrollable_frame(dlg)
+        outer.pack(fill="both", expand=True)
+        bind_mousewheel(dlg, canvas)
+
+        wrap = tk.Frame(inner, bg=BG)
+        wrap.pack(padx=24, pady=16, fill="x")
+
+        tk.Label(wrap, text="✏️  تعديل بيانات الآلية",
+                 bg=BG, fg=ACCENT, font=("Segoe UI", 13, "bold")).pack(
+                     anchor="w", pady=(0, 10))
+
+        c_all = card_frame(wrap)
+        c_all.pack(fill="x")
+        g_all = tk.Frame(c_all, bg=CARD)
+        g_all.pack(padx=16, pady=16, fill="x")
+
+        edit_vars = {}
+        all_fields = [
+            ("اسم السائق",              "driverName",       "entry"),
+            ("نوع الآلية",             "vehicleType",      "combo", VEHICLE_TYPES),
+            ("اسم الآلية",             "vehicleName",      "entry"),
+            ("رقم الآلية",             "vehicleNum",       "entry"),
+            ("زيت مع الفلتر (ل)",      "oilWithFilter",    "entry"),
+            ("زيت بدون الفلتر (ل)",    "oilWithoutFilter", "entry"),
+            ("درجة الزيت",             "oilGrade",         "combo", OIL_GRADES),
+            ("الوقود (ل/يوم)",         "fuelQty",          "entry"),
+            ("تاريخ تغيير الزيت",      "oilChangeDate",    "date"),
+            ("استحقاق الزيت القادم",   "oilNextDate",      "date"),
+            ("تاريخ تغيير الفلتر",     "filterChangeDate", "date"),
+            ("استحقاق الفلتر القادم",  "filterNextDate",   "date"),
+            ("ملاحظات",                "notes",            "entry"),
+        ]
+        self._build_grid(g_all, all_fields, edit_vars, cols=2)
+
+        # Pre-fill
+        for k, var in edit_vars.items():
+            var.set(v.get(k, "") or "")
+
+        # Auto-calc in edit too
+        aiv = tk.StringVar()
+        ac_row = tk.Frame(wrap, bg=BG)
+        ac_row.pack(fill="x", pady=4)
+        tk.Label(ac_row, text="⚡ حساب تلقائي:", bg=BG, fg=MUTED,
+                 font=("Segoe UI", 8, "bold")).pack(side="left")
+        make_combo(ac_row, OIL_INTERVALS, aiv, width=10).pack(side="left", padx=6)
+        def _auto(d_map={"30 يوم":30,"60 يوم":60,"90 يوم":90,"180 يوم":180,"365 يوم":365}):
+            days = d_map.get(aiv.get(), 0)
+            if not days: return
+            for cd, nd in (("oilChangeDate","oilNextDate"),
+                           ("filterChangeDate","filterNextDate")):
+                s = edit_vars[cd].get().strip()
+                if s and is_valid_date(s):
+                    edit_vars[nd].set(add_days_to_date(s, days))
+        make_btn(ac_row, "⚙️ تطبيق", _auto, color=ACCENT2, fg="#fff", size=8).pack(side="left")
+
+        def save_edit():
+            # Validate required
+            if not edit_vars["driverName"].get().strip() or \
+               not edit_vars["vehicleName"].get().strip() or \
+               not edit_vars["vehicleNum"].get().strip():
+                messagebox.showwarning("حقول مطلوبة",
+                    "⚠️ اسم السائق واسم الآلية ورقمها مطلوبة",
+                    parent=dlg)
+                return
+            for dk in ("oilChangeDate","oilNextDate","filterChangeDate","filterNextDate"):
+                val = edit_vars[dk].get().strip()
+                if val and not is_valid_date(val):
+                    messagebox.showwarning("تاريخ غير صحيح",
+                        f"⚠️ التاريخ في '{dk}' غير صحيح", parent=dlg)
+                    return
+            self.vehicles[real_i] = {
+                **self.vehicles[real_i],
+                **{k: ev.get().strip() for k, ev in edit_vars.items()}
+            }
+            save_vehicles(self.vehicles)
+            self._refresh_all()
+            dlg.destroy()
+            messagebox.showinfo("تم", "✅ تم حفظ التعديلات بنجاح")
+
+        btn_row = tk.Frame(wrap, bg=BG)
+        btn_row.pack(pady=14)
+        make_btn(btn_row, "💾  حفظ التعديلات", save_edit,
+                 color=ACCENT, fg=BG).pack(side="left", padx=6)
+        make_btn(btn_row, "❌  إلغاء (Esc)", dlg.destroy,
+                 color=CARD2, fg=TEXT).pack(side="left", padx=6)
+
+    # ══════════════════════════════════════════════
+    #  STATS TAB
+    # ══════════════════════════════════════════════
+    def _build_stats_tab(self):
+        outer, inner, canvas = scrollable_frame(self.tab_stats)
+        outer.pack(fill="both", expand=True)
+        self._stats_inner  = inner
+        self._stats_canvas = canvas
+        bind_mousewheel(self.tab_stats, canvas)
+
+    def _refresh_stats(self):
+        for w in self._stats_inner.winfo_children():
+            w.destroy()
+
+        vs = self.vehicles
+        wrap = tk.Frame(self._stats_inner, bg=BG)
+        wrap.pack(fill="x", padx=32, pady=20)
+
+        # ── KPI Cards ──
+        total_fuel = sum(float(v.get("fuelQty") or 0) for v in vs)
+        total_oil  = sum(float(v.get("oilWithFilter") or 0) for v in vs)
+        overdue    = sum(1 for v in vs
+                         if status_tag(v.get("oilNextDate"))    == "danger"
+                         or status_tag(v.get("filterNextDate")) == "danger")
+        due_soon   = sum(1 for v in vs
+                         if status_tag(v.get("oilNextDate"))    == "warn"
+                         or status_tag(v.get("filterNextDate")) == "warn")
+        ok_count   = len(vs) - overdue - due_soon
+
+        kpis = [
+            ("🚛", str(len(vs)),        "إجمالي الآليات",           ACCENT),
+            ("⛽", f"{total_fuel:.1f}", "وقود إجمالي (ل/يوم)",      ACCENT2),
+            ("🛢️", f"{total_oil:.1f}", "زيت إجمالي (ل)",           ACCENT),
+            ("✅", str(ok_count),       "آليات جيدة",               ACCENT3),
+            ("⚠️", str(due_soon),      "تستحق الصيانة قريباً",      ACCENT),
+            ("🚨", str(overdue),        "متأخرة الصيانة",            DANGER),
+        ]
+
+        kpi_row = tk.Frame(wrap, bg=BG)
+        kpi_row.pack(fill="x", pady=(0, 20))
+        for icon, val, lbl, color in kpis:
+            c = card_frame(kpi_row)
+            c.pack(side="left", padx=6, pady=4, ipadx=8, ipady=6)
+            tk.Label(c, text=icon, bg=CARD,
+                     font=("Segoe UI", 26)).pack(pady=(12, 2))
+            tk.Label(c, text=val, bg=CARD, fg=color,
+                     font=("Segoe UI", 24, "bold")).pack()
+            tk.Label(c, text=lbl, bg=CARD, fg=MUTED,
+                     font=("Segoe UI", 8), wraplength=110).pack(pady=(2, 12))
+
+        # ── Bar Chart: Oil Status per Vehicle ──
+        if vs:
+            self._section_label(wrap, "📊  مخطط حالة الزيت لكل آلية")
+            chart_card = card_frame(wrap)
+            chart_card.pack(fill="x", pady=(0, 20))
+            self._draw_bar_chart(chart_card, vs)
+
+            # ── Summary Table ──
+            self._section_label(wrap, "📋  ملخص حالة جميع الآليات")
+            tbl_card = card_frame(wrap)
+            tbl_card.pack(fill="x", pady=(0, 20))
+            self._draw_summary_table(tbl_card, vs)
+
+            # ── Vehicle Type Breakdown ──
+            self._section_label(wrap, "🔢  توزيع الآليات حسب النوع")
+            type_card = card_frame(wrap)
+            type_card.pack(fill="x", pady=(0, 20))
+            self._draw_type_breakdown(type_card, vs)
+
+    def _draw_bar_chart(self, parent, vs):
+        """Canvas bar chart showing days until next oil change."""
+        ch = 200
+        cw = max(600, 80 * len(vs))
+        cv = tk.Canvas(parent, bg=CARD, height=ch,
+                        width=cw, highlightthickness=0)
+        cv.pack(fill="x", padx=8, pady=12)
+
+        if not vs:
+            return
+
+        bar_w   = min(60, int(cw / len(vs)) - 8)
+        spacing = int(cw / len(vs))
+        max_days = 100
+
+        for i, v in enumerate(vs):
+            d     = days_until(v.get("oilNextDate"))
+            label = (v.get("vehicleNum") or v.get("vehicleName") or f"#{i+1}")[:8]
+            x     = spacing * i + spacing // 2
+
+            if d is None:
+                color, bar_h = MUTED, 10
+            elif d < 0:
+                color, bar_h = DANGER, min(abs(d), max_days)
+            elif d <= 7:
+                color, bar_h = ACCENT, d
+            else:
+                color, bar_h = ACCENT3, min(d, max_days)
+
+            bar_h_px = int((bar_h / max_days) * (ch - 50))
+            bar_h_px = max(bar_h_px, 4)
+
+            y1 = ch - 30 - bar_h_px
+            y2 = ch - 30
+
+            cv.create_rectangle(x - bar_w//2, y1,
+                                 x + bar_w//2, y2,
+                                 fill=color, outline="", width=0)
+
+            # Day label on bar
+            day_txt = str(d) if d is not None else "؟"
+            cv.create_text(x, y1 - 6, text=day_txt,
+                           fill=TEXT, font=("Segoe UI", 8, "bold"))
+            # Vehicle label below
+            cv.create_text(x, ch - 14, text=label,
+                           fill=MUTED, font=("Segoe UI", 7),
+                           angle=0)
+
+        # Axis line
+        cv.create_line(20, ch - 30, cw - 20, ch - 30,
+                       fill=BORDER, width=1)
+        cv.create_text(cw - 20, ch - 44,
+                       text="الأيام المتبقية للتغيير (ألوان: 🟢 جيد  🟡 قريب  🔴 متأخر)",
+                       fill=MUTED, font=("Segoe UI", 7), anchor="e")
+
+    def _draw_summary_table(self, parent, vs):
+        cols = ("الآلية", "الرقم", "السائق", "حالة الزيت", "متبقي(ي)", "حالة الفلتر", "متبقي(ي)")
+        t = ttk.Treeview(parent, columns=cols, show="headings",
+                          height=min(len(vs), 10))
+        widths = [130, 110, 120, 120, 80, 120, 80]
+        for c, w in zip(cols, widths):
+            t.heading(c, text=c)
+            t.column(c, width=w, anchor="center", minwidth=50)
+        t.tag_configure("danger", foreground=DANGER)
+        t.tag_configure("warn",   foreground=ACCENT)
+        t.tag_configure("ok",     foreground=ACCENT3)
+
+        for v in vs:
+            ot, oc = status_text(v.get("oilNextDate", ""))
+            ft, fc = status_text(v.get("filterNextDate", ""))
+            od = days_until(v.get("oilNextDate"))
+            fd = days_until(v.get("filterNextDate"))
+            tag = "danger" if oc==DANGER or fc==DANGER else \
+                  "warn"   if oc==ACCENT  or fc==ACCENT  else "ok"
+            t.insert("", "end",
+                     values=(v.get("vehicleName","-"),
+                             v.get("vehicleNum","-"),
+                             v.get("driverName","-"),
+                             ot, str(od) if od is not None else "—",
+                             ft, str(fd) if fd is not None else "—"),
+                     tags=(tag,))
+        t.pack(fill="x", padx=8, pady=8)
+
+    def _draw_type_breakdown(self, parent, vs):
+        from collections import Counter
+        counts = Counter(v.get("vehicleType") or "غير محدد" for v in vs)
+        frm = tk.Frame(parent, bg=CARD)
+        frm.pack(padx=16, pady=12, fill="x")
+        for typ, cnt in sorted(counts.items(), key=lambda x: -x[1]):
+            row = tk.Frame(frm, bg=CARD)
+            row.pack(fill="x", pady=3)
+            tk.Label(row, text=typ, bg=CARD, fg=TEXT,
+                     font=("Segoe UI", 9, "bold"), width=14,
+                     anchor="e").pack(side="left", padx=8)
+            bar_f = tk.Frame(row, bg=CARD2, height=18)
+            bar_f.pack(side="left", fill="x", expand=True)
+            bar_f.pack_propagate(False)
+            pct = cnt / len(vs)
+            bar_inner = tk.Frame(bar_f, bg=ACCENT2, height=18,
+                                  width=int(pct * 300))
+            bar_inner.place(x=0, y=0, relheight=1.0,
+                            relwidth=pct)
+            tk.Label(row, text=f"{cnt}  ({pct:.0%})",
+                     bg=CARD, fg=MUTED,
+                     font=("Segoe UI", 8)).pack(side="left", padx=8)
+
+    # ══════════════════════════════════════════════
+    #  NOTIFICATIONS TAB
+    # ══════════════════════════════════════════════
+    def _build_notif_tab(self):
+        outer, inner, canvas = scrollable_frame(self.tab_notif)
+        outer.pack(fill="both", expand=True)
+        self._notif_inner  = inner
+        self._notif_canvas = canvas
+        bind_mousewheel(self.tab_notif, canvas)
+
+    def _refresh_notif(self):
+        for w in self._notif_inner.winfo_children():
+            w.destroy()
+
+        wrap = tk.Frame(self._notif_inner, bg=BG)
+        wrap.pack(fill="x", padx=32, pady=20)
+
+        tk.Label(wrap, text="🔔  التنبيهات والإشعارات",
+                 bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 13, "bold")).pack(anchor="w", pady=(0, 4))
+        tk.Label(wrap,
+                 text=f"آخر فحص: {datetime.now().strftime('%Y-%m-%d  %H:%M:%S')}",
+                 bg=BG, fg=MUTED, font=("Segoe UI", 8)).pack(anchor="w", pady=(0, 14))
+
+        items = []
+        for v in self.vehicles:
+            od  = days_until(v.get("oilNextDate"))
+            fd  = days_until(v.get("filterNextDate"))
+            nm  = v.get("vehicleName", "؟")
+            num = v.get("vehicleNum",  "؟")
+            drv = v.get("driverName",  "؟")
+            if od is not None:
+                if od < 0:
+                    items.append(("danger",
+                        f"🚨  {nm}  ({num})\n"
+                        f"     الزيت متأخر بـ {abs(od)} يوم!   السائق: {drv}"))
+                elif od == 0:
+                    items.append(("warn",
+                        f"⚠️  {nm}  ({num})\n"
+                        f"     تغيير الزيت اليوم!   السائق: {drv}"))
+                elif od <= 7:
+                    items.append(("warn",
+                        f"⚠️  {nm}  ({num})\n"
+                        f"     تغيير الزيت بعد {od} أيام.   السائق: {drv}"))
+            if fd is not None:
+                if fd < 0:
+                    items.append(("danger",
+                        f"🚨  {nm}  ({num})\n"
+                        f"     فلتر الزيت متأخر بـ {abs(fd)} يوم!   السائق: {drv}"))
+                elif fd == 0:
+                    items.append(("warn",
+                        f"⚠️  {nm}  ({num})\n"
+                        f"     تغيير الفلتر اليوم!   السائق: {drv}"))
+                elif fd <= 7:
+                    items.append(("warn",
+                        f"⚠️  {nm}  ({num})\n"
+                        f"     تغيير الفلتر بعد {fd} أيام.   السائق: {drv}"))
+
+        if not items:
+            c = card_frame(wrap, bg=CARD)
+            c.pack(fill="x", pady=4)
+            tk.Label(c, text="\n✅  جميع الآليات في حالة جيدة — لا توجد تنبيهات\n",
+                     bg=CARD, fg=ACCENT3,
+                     font=("Segoe UI", 13, "bold")).pack(pady=20)
+        else:
+            # Danger first
+            for severity in ("danger", "warn"):
+                group = [x for x in items if x[0] == severity]
+                if not group:
+                    continue
+                g_label = "🔴  تنبيهات عاجلة (متأخرة)" if severity == "danger" \
+                          else "🟡  تنبيهات وشيكة (خلال 7 أيام)"
+                g_color = DANGER if severity == "danger" else ACCENT
+                tk.Label(wrap, text=g_label, bg=BG, fg=g_color,
+                         font=("Segoe UI", 10, "bold")).pack(
+                             anchor="w", pady=(10, 4))
+                for _, msg in group:
+                    c = card_frame(wrap)
+                    c.pack(fill="x", pady=3)
+                    border_c = card_frame(c, bg=g_color)
+                    border_c.pack(side="left", fill="y", ipadx=3)
+                    tk.Label(c, text=msg, bg=CARD, fg=TEXT,
+                             font=("Segoe UI", 10), anchor="w",
+                             justify="left", wraplength=900).pack(
+                                 anchor="w", padx=16, pady=12)
+
+        # Update tab badge
+        n   = len(items)
+        lbl = f"  🔔 التنبيهات ({n})  " if n > 0 else "  🔔 التنبيهات  "
+        self.nb.tab(3, text=lbl)
+
+    # ══════════════════════════════════════════════
+    #  STARTUP ALERT
+    # ══════════════════════════════════════════════
+    def _check_startup_alerts(self):
+        overdue = [v for v in self.vehicles
+                   if status_tag(v.get("oilNextDate"))    == "danger"
+                   or status_tag(v.get("filterNextDate")) == "danger"]
+        if not overdue:
+            return
+        msg = f"⚠️ يوجد {len(overdue)} آلية متأخرة الصيانة:\n\n"
+        for v in overdue[:5]:
+            msg += f"  • {v.get('vehicleName','-')}  ({v.get('vehicleNum','-')})\n"
+        if len(overdue) > 5:
+            msg += f"  ... و {len(overdue)-5} أخرى"
+        msg += "\nيرجى المراجعة الفورية."
+        self.root.after(800, lambda: messagebox.showwarning(
+            "🚨 تنبيه الصيانة", msg))
+
+    # ══════════════════════════════════════════════
+    #  USER MANAGEMENT
+    # ══════════════════════════════════════════════
+    def _open_user_mgmt(self):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("👥  إدارة المستخدمين")
+        dlg.configure(bg=BG)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+        w_, h_ = 540, 560
+        sw     = dlg.winfo_screenwidth()
+        sh     = dlg.winfo_screenheight()
+        dlg.geometry(f"{w_}x{h_}+{(sw-w_)//2}+{(sh-h_)//2}")
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+
+        tk.Label(dlg, text="⚙️  إدارة المستخدمين",
+                 bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 13, "bold")).pack(pady=16)
+
+        list_f = tk.Frame(dlg, bg=BG)
+        list_f.pack(fill="x", padx=24)
+
+        def refresh():
+            for w in list_f.winfo_children():
+                w.destroy()
+            for i, u in enumerate(load_users()):
+                row = card_frame(list_f)
+                row.pack(fill="x", pady=3)
+                ri = tk.Frame(row, bg=CARD)
+                ri.pack(fill="x", padx=12, pady=8)
+                icon = "👑" if u["role"] == "admin" else "👤"
+                tk.Label(ri, text=icon, bg=CARD,
+                         font=("Segoe UI", 14)).pack(side="left", padx=(0,6))
+                inf = tk.Frame(ri, bg=CARD)
+                inf.pack(side="left", fill="x", expand=True)
+                tk.Label(inf, text=u.get("name", u["username"]),
+                         bg=CARD, fg=TEXT,
+                         font=("Segoe UI", 10, "bold")).pack(anchor="w")
+                tk.Label(inf, text=f"@{u['username']}",
+                         bg=CARD, fg=MUTED,
+                         font=("Segoe UI", 8)).pack(anchor="w")
+                rc = ACCENT if u["role"] == "admin" else ACCENT2
+                tk.Label(ri, text="مدير" if u["role"]=="admin" else "مستخدم",
+                         bg=CARD, fg=rc,
+                         font=("Segoe UI", 9, "bold")).pack(side="left", padx=8)
+                if u["username"] != "admin":
+                    def _del(idx=i):
+                        if messagebox.askyesno("تأكيد", "حذف هذا المستخدم؟", parent=dlg):
+                            us = load_users(); us.pop(idx); save_users(us); refresh()
+                    make_btn(ri, "🗑️", _del,
+                             color=DANGER, fg="#fff", size=9).pack(side="right")
+
+        refresh()
+
+        sep = ttk.Separator(dlg, orient="horizontal")
+        sep.pack(fill="x", padx=24, pady=12)
+
+        tk.Label(dlg, text="➕  إضافة مستخدم جديد",
+                 bg=BG, fg=MUTED,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=24)
+
+        af = tk.Frame(dlg, bg=BG)
+        af.pack(fill="x", padx=24, pady=8)
+        nu = tk.StringVar(); np_ = tk.StringVar(); nr = tk.StringVar(value="user")
+
+        for c in range(3): af.columnconfigure(c, weight=1)
+        for col, lbl, var, show in [
+            (0, "اسم المستخدم", nu, ""),
+            (1, "كلمة المرور",  np_, "●"),
+        ]:
+            tk.Label(af, text=lbl, bg=BG, fg=MUTED,
+                     font=("Segoe UI", 8)).grid(row=0, column=col, sticky="w", padx=4)
+            make_entry(af, var, width=14, show=show).grid(
+                row=1, column=col, padx=4, pady=2, sticky="ew")
+        tk.Label(af, text="الدور", bg=BG, fg=MUTED,
+                 font=("Segoe UI", 8)).grid(row=0, column=2, sticky="w", padx=4)
+        make_combo(af, ["user","admin"], nr, width=10).grid(
+            row=1, column=2, padx=4, pady=2, sticky="ew")
+
+        msg_l = tk.Label(dlg, text="", bg=BG, font=("Segoe UI", 9))
+        msg_l.pack()
+
+        def add_user():
+            u, p, r = nu.get().strip(), np_.get().strip(), nr.get()
+            if not u or not p:
+                msg_l.config(text="⚠️ أدخل اسم المستخدم وكلمة المرور", fg=DANGER)
+                return
+            us = load_users()
+            if any(x["username"] == u for x in us):
+                msg_l.config(text="⚠️ اسم المستخدم موجود مسبقاً", fg=DANGER)
+                return
+            us.append({"username":u,"password":p,"role":r,"name":u})
+            save_users(us)
+            nu.set(""); np_.set("")
+            msg_l.config(text="✅ تم إضافة المستخدم", fg=ACCENT3)
+            refresh()
+
+        make_btn(dlg, "✅  إضافة المستخدم", add_user,
+                 color=ACCENT, fg=BG).pack(pady=8)
+        make_btn(dlg, "✖  إغلاق (Esc)", dlg.destroy,
+                 color=CARD2, fg=TEXT).pack(pady=2)
+
+    # ══════════════════════════════════════════════
+    #  CHANGE PASSWORD
+    # ══════════════════════════════════════════════
+    def _change_password(self):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("🔑  تغيير كلمة المرور")
+        dlg.configure(bg=BG)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+        dlg.geometry("380x320")
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+
+        tk.Label(dlg, text="🔑  تغيير كلمة المرور",
+                 bg=BG, fg=ACCENT,
+                 font=("Segoe UI", 13, "bold")).pack(pady=16)
+
+        c = card_frame(dlg)
+        c.pack(fill="x", padx=24)
+        inn = tk.Frame(c, bg=CARD)
+        inn.pack(padx=20, pady=20, fill="x")
+
+        op = tk.StringVar(); np1 = tk.StringVar(); np2 = tk.StringVar()
+        for lbl, var in [("كلمة المرور الحالية", op),
+                          ("كلمة المرور الجديدة", np1),
+                          ("تأكيد كلمة المرور الجديدة", np2)]:
+            tk.Label(inn, text=lbl, bg=CARD, fg=MUTED,
+                     font=("Segoe UI", 8, "bold")).pack(anchor="w")
+            e = make_entry(inn, var, show="●", width=30)
+            e.pack(fill="x", pady=(3, 10))
+
+        msg_l = tk.Label(dlg, text="", bg=BG, font=("Segoe UI", 9))
+        msg_l.pack()
+
+        def save_pw():
+            us = load_users()
+            user = next((x for x in us
+                         if x["username"] == self.current_user["username"]), None)
+            if not user or user["password"] != op.get():
+                msg_l.config(text="❌ كلمة المرور الحالية غير صحيحة", fg=DANGER)
+                return
+            if len(np1.get()) < 4:
+                msg_l.config(text="⚠️ كلمة المرور الجديدة قصيرة جداً (4 أحرف على الأقل)", fg=ACCENT)
+                return
+            if np1.get() != np2.get():
+                msg_l.config(text="❌ كلمة المرور الجديدة غير متطابقة", fg=DANGER)
+                return
+            user["password"] = np1.get()
+            self.current_user["password"] = np1.get()
+            save_users(us)
+            msg_l.config(text="✅ تم تغيير كلمة المرور بنجاح", fg=ACCENT3)
+            dlg.after(1500, dlg.destroy)
+
+        make_btn(dlg, "💾  حفظ", save_pw, color=ACCENT, fg=BG).pack(pady=8)
+        make_btn(dlg, "✖  إلغاء (Esc)", dlg.destroy,
+                 color=CARD2, fg=TEXT).pack()
+
+    # ══════════════════════════════════════════════
+    #  CSV EXPORT
+    # ══════════════════════════════════════════════
+    def _export_csv(self):
+        if not self.vehicles:
+            messagebox.showinfo("تنبيه", "لا توجد آليات لتصديرها")
+            return
+        ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(DATA_DIR, f"vehicles_export_{ts}.csv")
+        try:
+            headers = [
+                "م", "اسم السائق", "نوع الآلية", "اسم الآلية",
+                "رقم الآلية", "زيت مع فلتر", "زيت بدون فلتر",
+                "درجة الزيت", "وقود (ل/يوم)",
+                "تغيير الزيت", "استحقاق الزيت", "حالة الزيت",
+                "تغيير الفلتر", "استحقاق الفلتر", "حالة الفلتر",
+                "ملاحظات", "تاريخ الإضافة"
+            ]
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow(headers)
+                for i, v in enumerate(self.vehicles):
+                    ot, _ = status_text(v.get("oilNextDate", ""))
+                    ft, _ = status_text(v.get("filterNextDate", ""))
+                    w.writerow([
+                        i+1,
+                        v.get("driverName", ""),
+                        v.get("vehicleType", ""),
+                        v.get("vehicleName", ""),
+                        v.get("vehicleNum", ""),
+                        v.get("oilWithFilter", ""),
+                        v.get("oilWithoutFilter", ""),
+                        v.get("oilGrade", ""),
+                        v.get("fuelQty", ""),
+                        v.get("oilChangeDate", ""),
+                        v.get("oilNextDate", ""),
+                        ot,
+                        v.get("filterChangeDate", ""),
+                        v.get("filterNextDate", ""),
+                        ft,
+                        v.get("notes", ""),
+                        v.get("addedAt", "")[:10] if v.get("addedAt") else "",
+                    ])
+            messagebox.showinfo("تم التصدير",
+                f"✅ تم تصدير {len(self.vehicles)} آلية إلى:\n{path}")
+        except Exception as ex:
+            messagebox.showerror("خطأ", f"فشل التصدير:\n{ex}")
+
+    # ══════════════════════════════════════════════
+    #  LOGOUT / CLOSE
+    # ══════════════════════════════════════════════
+    def _logout(self):
+        if messagebox.askyesno("تأكيد", "هل تريد تسجيل الخروج؟"):
+            self._do_logout()
+
+    def _on_close(self):
+        if messagebox.askyesno("تأكيد", "هل تريد إغلاق البرنامج؟"):
+            self._do_logout()
+
+    def _do_logout(self):
+        self.root.destroy()
+        main()
+
+    # ══════════════════════════════════════════════
+    #  REFRESH ALL
+    # ══════════════════════════════════════════════
+    def _refresh_all(self):
+        self.vehicles = load_vehicles()   # reload from disk
+        self._refresh_table()
+        self._refresh_stats()
+        self._refresh_notif()
+        self._update_status()
+
+# ─────────────────────────────────────────────────────────────────
+#  ENTRY POINT
+# ─────────────────────────────────────────────────────────────────
+def main():
+    LoginWindow(on_success=lambda user: VehicleApp(user))
+
+if __name__ == "__main__":
+    main()
